@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Détection de Distance et Vitesse de Voitures et Camions</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/2.1.1/tesseract.min.js"></script>
+    <style>
+        /* Positionner le canvas par-dessus la vidéo */
+        #videoContainer {
+            position: relative;
+            width: 100%;
+            max-width: 640px;
+            margin: 0 auto;
+        }
+        #video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        #canvasOutput {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <h1>Détection de Distance et Vitesse de Voitures et Camions</h1>
+    <div id="videoContainer">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvasOutput"></canvas>
+    </div>
+    <script>
+        // Accéder à la caméra
+        const video = document.getElementById('video');
+        const constraints = { video: { facingMode: { ideal: 'environment' } } };
+
+        navigator.mediaDevices.getUserMedia(constraints)
+            .then((stream) => {
+                console.log('Accès à la caméra réussi');
+                video.srcObject = stream;
+                video.addEventListener('loadeddata', () => {
+                    console.log('Flux vidéo chargé');
+                    resizeCanvas();
+                    detectFrame();
+                });
+            })
+            .catch((err) => {
+                console.error('Erreur lors de l\'accès à la caméra: ' + err);
+            });
+
+        let model;
+        let previousPositions = {};
+        const focalLength = 700; // Focale de la caméra (à calibrer)
+        let lastCallTime = performance.now() / 1000;
+
+        let objectCounter = 0; // Compteur pour les identifiants uniques
+
+        // Charger le modèle COCO-SSD
+        cocoSsd.load().then(loadedModel => {
+            model = loadedModel;
+            console.log('Modèle chargé');
+            detectFrame();
+        });
+
+        function resizeCanvas() {
+            const canvasOutput = document.getElementById('canvasOutput');
+            canvasOutput.width = video.videoWidth;
+            canvasOutput.height = video.videoHeight;
+        }
+
+        async function detectFrame() {
+            if (!model || !video.videoWidth) {
+                requestAnimationFrame(detectFrame);
+                return;
+            }
+
+            const canvasOutput = document.getElementById('canvasOutput');
+            const context = canvasOutput.getContext('2d');
+            context.drawImage(video, 0, 0, canvasOutput.width, canvasOutput.height);
+            const predictions = await model.detect(video);
+
+            context.clearRect(0, 0, canvasOutput.width, canvasOutput.height);
+            context.drawImage(video, 0, 0, canvasOutput.width, canvasOutput.height);
+
+            const currentTime = performance.now() / 1000;
+            lastCallTime = currentTime;
+
+            // Dessiner les rectangles et les étiquettes pour les voitures et camions détectés
+            predictions.forEach(async prediction => {
+                if (prediction.class === 'car' || prediction.class === 'truck') {
+                    const [x, y, width, height] = prediction.bbox;
+                    const realWidth = (prediction.class === 'car') ? 1.8 : 2.5; // Largeur réelle moyenne en mètres
+
+                    // Estimer la distance
+                    const distance = (focalLength * realWidth) / width;
+
+                    // Calculer la vitesse relative
+                    let id;
+                    let velocity = 0;
+
+                    // Vérifier si l'objet a déjà été détecté
+                    const existingId = Object.keys(previousPositions).find(key => {
+                        const prev = previousPositions[key];
+                        return Math.abs(prev.x - x) < 20 && Math.abs(prev.y - y) < 20;
+                    });
+
+                    if (existingId) {
+                        id = existingId;
+                        const previous = previousPositions[id];
+                        const deltaTime = currentTime - previous.time;
+                        const deltaDistance = parseFloat(previous.distance) - distance;
+                        if (deltaTime > 0) { // Assurez-vous que le temps écoulé est positif
+                            velocity = deltaDistance / deltaTime; // Vitesse en m/s
+                        }
+                    } else {
+                        id = `obj-${objectCounter++}`;
+                    }
+
+                    // Dessiner le rectangle et afficher la distance, la vitesse et l'identifiant
+                    context.strokeStyle = 'red';
+                    context.lineWidth = 4;
+                    context.strokeRect(x, y, width, height);
+                    context.fillStyle = 'red';
+                    context.font = '20px Arial';
+                    context.fillText(`ID: ${id} - ${distance.toFixed(2)} m, ${velocity.toFixed(2)} m/s`, x, y > 10 ? y - 10 : 10);
+
+                    // Extraire la région de la plaque d'immatriculation
+                    const plateRegion = context.getImageData(x, y + height * 0.8, width, height * 0.2);
+                    const plateCanvas = document.createElement('canvas');
+                    const plateContext = plateCanvas.getContext('2d');
+                    plateCanvas.width = width;
+                    plateCanvas.height = height * 0.2;
+                    plateContext.putImageData(plateRegion, 0, 0);
+
+                    // Utiliser Tesseract.js pour l'OCR
+                    const { data: { text } } = await Tesseract.recognize(
+                        plateCanvas.toDataURL(),
+                        'eng',
+                        {
+                            logger: m => console.log(m) // Pour suivre la progression
+                        }
+                    );
+
+                    // Afficher le texte reconnu
+                    context.fillStyle = 'blue';
+                    context.fillText(`Plaque: ${text.trim()}`, x, y + height + 20);
+
+                    // Mettre à jour la position précédente
+                    previousPositions[id] = { time: currentTime, distance: distance, x: x, y: y };
+                }
+            });
+
+            requestAnimationFrame(detectFrame);
+        }
+    </script>
+</body>
+</html>
